@@ -1,0 +1,348 @@
+---
+title: "TextMiningTwitter"
+author: "Juan Garcia Ruiz"
+date: "14 de mayo de 2019"
+output:
+  html_document: 
+    number_sections: yes
+    theme: darkly
+    toc: yes
+  word_document:
+    toc: yes
+  pdf_document:
+    fig_caption: yes
+    number_sections: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+library(devtools)
+library(base64enc)
+library("twitteR")
+library("tm")
+library("ggplot2")
+library("ggmap")
+library("twitteR")
+library("httr")
+library("wordcloud")
+library ("SnowballC")
+library("RColorBrewer")
+library("stringr")
+library("lubridate")
+library("data.table")
+library(plyr)
+library(wordcloud)
+library(rtweet)
+library(dplyr)
+library(webshot)
+library(htmlwidgets)
+library(wordcloud2)
+```
+
+```{r echo=FALSE}
+CONSUMER_KEY <- ''
+CONSUMER_SECRET <- ''
+access_token <- ''
+access_secret <- ''
+
+download.file(url = "http://curl.haxx.se/ca/cacert.pem",destfile="cacert.pem")
+
+setup_twitter_oauth(CONSUMER_KEY, CONSUMER_SECRET, access_token, access_secret)
+```
+
+Vamos a realizar un analisis de los tweets que hablen sobre el cambio climatico. 
+
+Para ello, primero obtendremos de Twitter los tweets que contengan el hashtag **#CambioClimatico**:
+
+```{r}
+if(!file.exists("./climateChangeTweets.csv")){
+  tweets <- searchTwitter("#CambioClimatico", n = 6000)
+  tweets.data.frame <- ldply(tweets, function(l) l$toDataFrame())
+  write.csv(tweets.data.frame, file = "climateChangeTweets.csv")
+}else{
+  tweets.data.frame <- read.csv("climateChangeTweets.csv")
+}
+```
+
+Visualizamos los primeros tweets que tenemos guardados:
+
+```{r}
+head(tweets.data.frame)
+```
+
+Veamos el número total de tweets que tenemos, o lo que es lo mismo, el número de filas que tiene nuestro dataframe:
+
+```{r}
+nrow(tweets.data.frame)
+```
+
+También sería interesante saber cuantos usuarios han participado:
+
+```{r}
+unique.Users <- unique(tweets.data.frame$screenName)
+length(unique.Users)
+```
+
+Como vemos, casi tenemos un usuario diferente por tweet publicado. El núeros de usuarios que por lo tanto han publicado más de un tweet usando este hashtag sería:
+
+```{r}
+duplicated.Users <- duplicated(tweets.data.frame$screenName)
+length(duplicated.Users[duplicated.Users == TRUE])
+```
+
+Hay que tener en cuenta que no todos los tweets que aparecen son tweets originales, mucho de estos pueden ser retweet. Veamos cuantos lo son:
+
+```{r}
+length(tweets.data.frame$isRetweet[tweets.data.frame$isRetweet == TRUE])
+```
+
+Vemos que casi tres cuartas partes de los tweets recogidos son RTs.
+
+Ahora veremos cuantos de los tweets han sido retweeteados:
+
+```{r}
+length(tweets.data.frame$retweeted[tweets.data.frame$retweeted == TRUE])
+```
+
+Por algun motivo devuelve 0, podriamos pensar que es porque solo se fija en los tweets originales y no los retweets pero existen tweets originales con retweets.
+
+Nos interesa ahora saber cuales son los 10 usuarios que más han participado:
+
+```{r}
+tweets.data.frame %>% group_by(screenName) %>% summarize(n=n()) %>% arrange(desc(n)) %>% top_n(10)
+```
+
+Tras echar un vistazo, vemos que el usuario **VetrepreneurOne** tiene una gran cantidad de interacciones con ese hashtag. Solo tenemos que meternos en su perfil para ver que es un bot que usa el hashtag para publicar cualquier cosa aunque no tenga nada que ver. Lo adecuado sería por tanto eliminarlo del dataframe:
+
+```{r message = FALSE}
+bot.tweets <- filter(tweets.data.frame, tweets.data.frame$screenName == "VetrepreneurOne")
+tweets.data.frame <- anti_join(tweets.data.frame, bot.tweets)
+```
+
+Quizas deberiamos fijarnos en aquellos tweets que más repercusión han tenido, miremos los tweets que hayan tenido mas de 5 retweets:
+
+```{r}
+popular.tweets <- as.data.frame(filter(tweets.data.frame,retweetCount > 5))
+nrow(popular.tweets)
+```
+
+Como vemos, hay una gran cantidad de tweets que han sido retweeteado más de 5 veces.
+
+# Text Mining
+
+## Pre-procesamiento
+
+Lo primero que deberíamos hacer es, quizás, eliminar los retweets. Creo que al fin y al cabo los retweet contaminan más de lo que aportan a la hora de realizar este analisis ya que podría aparecer repetido o ser un tweet que usa el hashtag pero que, aunque sea muy retweeteado, no hable de eso.
+
+```{r}
+tweets.data.frame <- filter(tweets.data.frame, tweets.data.frame$isRetweet == FALSE)
+nrow(tweets.data.frame)
+```
+
+Como vemos el número de tweets se ha reducido de manera considerable.
+
+A continuación, eliminaremos elementos del tweet que no nos interese. Por ejemplo, los hashtag y las menciones:
+
+```{r}
+tweets.data.frame$text <- stringr::str_replace_all(tweets.data.frame$text, "@\\w+"," ")
+tweets.data.frame$text <- stringr::str_replace_all(tweets.data.frame$text, "#\\S+"," ")
+```
+
+También todos los links:
+
+```{r}
+tweets.data.frame$text <- stringr::str_replace_all(tweets.data.frame$text, "http\\S+\\s*"," ")
+tweets.data.frame$text <- stringr::str_replace_all(tweets.data.frame$text, "http[[:alnum:]]*"," ")
+tweets.data.frame$text <- stringr::str_replace_all(tweets.data.frame$text, "http[[\\b+RT]]"," ")
+```
+
+Tras esto deberemos tener también cuidado con los caracteres especiales como las vocales con tilde o la letra **ñ**:
+
+```{r}
+tweets.data.frame$text <- stringr::str_replace_all(tweets.data.frame$text, "[à|á]", "a")
+tweets.data.frame$text <- stringr::str_replace_all(tweets.data.frame$text, "[è|é]", "e")
+tweets.data.frame$text <- stringr::str_replace_all(tweets.data.frame$text, "[ì|í]", "i")
+tweets.data.frame$text <- stringr::str_replace_all(tweets.data.frame$text, "[ò|ó]", "o")
+tweets.data.frame$text <- stringr::str_replace_all(tweets.data.frame$text, "[ù|ú]", "u")
+tweets.data.frame$text <- stringr::str_replace_all(tweets.data.frame$text, "[ñ]", "n")
+```
+
+Aunque seguramente los tweets esten en español, no esta mal eliminar también la **ç**:
+
+```{r}
+tweets.data.frame$text <- stringr::str_replace_all(tweets.data.frame$text, "[ç]", "c")
+```
+
+Para acabar con la eliminación de caracteres, vamos a eliminar simbolos de puntuación, exclamación...; los objetos invisibles y, además, los emojis:
+
+```{r}
+tweets.data.frame$text <- stringr::str_replace_all(tweets.data.frame$text, "[¡!?¿()/]", "")
+tweets.data.frame$text <- stringr::str_replace_all(tweets.data.frame$text, "[-']", " ")
+tweets.data.frame$text <- stringr::str_replace_all(tweets.data.frame$text, "[[:punct:]]", "")
+tweets.data.frame$text <- stringr::str_replace_all(tweets.data.frame$text, "[\r\n]", "")
+tweets.data.frame$text <- unlist(lapply(tweets.data.frame$text, function(c) iconv(c, "latin1", "ASCII", sub="")))
+```
+
+Tras todos estos preparatorios, procedemos a convertir los textos procesados en un corpus y lo ponemos en misnusculas:
+
+```{r warning=FALSE}
+tweetCorpus <- Corpus(VectorSource(tweets.data.frame$text))
+tweetCorpus <- tm_map(tweetCorpus, function(x) iconv(enc2utf8(x), sub = "byte"))
+tweetCorpus <- tm_map(tweetCorpus, content_transformer(tolower))
+```
+
+A continuación eliminamos los números, signos de puntuación y espacios en blanco:
+
+```{r warning=FALSE}
+tweetCorpus <- tm_map(tweetCorpus, removeNumbers)
+tweetCorpus <- tm_map(tweetCorpus, removePunctuation)
+tweetCorpus <- tm_map(tweetCorpus, stripWhitespace)
+```
+
+Por último, eliminaremos palabras inútiles y algunas palabras extras que aparecen en el wordcloud que nos parecen poco relevantes:
+
+```{r warning=FALSE}
+tweetCorpus <- tm_map(tweetCorpus, removeWords, stopwords("spanish"))
+tweetCorpus <- tm_map(tweetCorpus, removeWords, c("sera","mas","ufcc","uff","debido","quedaran","anos","hacer","via","dia","the","cada","hoy","ser","ufd","puede","solo","asi","hace","vez","segun","estan","ufe","ufa","ano","ver", "sgk", "cop"))
+```
+
+## Generación DTM
+
+```{r}
+dtm <- DocumentTermMatrix(tweetCorpus)
+dtm
+```
+
+Obtenemos ahora las frecuancias de las palabras y mostramos las que más aparecen:
+
+```{r}
+freq <- colSums(as.matrix(dtm))
+ord <- order(freq)
+freq[tail(ord)]
+```
+
+Como podemos intuir, no todas las palabras recogidas nos pueden interesar. Las palabras menos comunes no requieren de nuestra atención para hacer el estudio. 
+
+Lo que haremos es obtener la media de la frecuencia de aparición de las palabras, nos quedaremos con aquellas cuya frecuencia sea mayor y finalmente lo ordenaremos el dataframe creado de más a menos frecuente:
+
+```{r message=FALSE}
+freq.mean <- mean(freq[ord])
+freq.mean
+freq.data.frame <- data.frame(name = names(freq), freq = freq)
+freq.data.frame <- filter(freq.data.frame, freq > freq.mean)
+freq.data.frame <- arrange(freq.data.frame, desc(freq))
+head(freq.data.frame,20)
+```
+
+Para visualizar estos datos mejor vamos a ponerlos en un grafico. Como son muchos terminos, pondremos los 30 mas importantes:
+
+```{r message=FALSE}
+ggplot(head(freq.data.frame,30)) + geom_point(aes(y = head(freq.data.frame$name,30), x = head(freq.data.frame$freq,30))) + ylab("Palabras") + xlab("Frequencia")
+```
+
+Ahora generaremos varios wordclouds con la información que hemos obtenido. Primero usaremos la biblioteca **wordcloud** aunque no nos permita guardarlo:
+
+```{r warning=FALSE}
+wordcloud(names(freq), freq, scale = c(3,0.5), max.words = 200, random.order = FALSE, colors = c("green1","green2","green3","green4"))
+```
+
+Ahora para poder guardarlo, recurriremos al paquete **wordcloud2**:
+
+```{r}
+wc1 <- wordcloud2(freq.data.frame, color = "random-dark")
+wc1
+saveWidget(wc1,"wc1.html",selfcontained = FALSE,title = "WordCloud 1")
+```
+
+El paquete **wordcloud2** nos permite una mayor customización a la hora de presentar las palabras. Por ejemplo, podemos crear wordclouds dentro de figuras:
+
+```{r}
+wcPentagon <- wordcloud2(freq.data.frame, color = "random-dark", shape = "pentagon")
+saveWidget(wcPentagon,"wcPentagon.html",selfcontained = FALSE,title = "WordCloud Pentagon")
+```
+
+Por ultimo, también podemos crear wordclouds dentro de imagenes:
+
+```{r}
+iceberg <- wordcloud2(freq.data.frame, figPath = "iceberg.png", size = 1.5, color = "skyblue")
+saveWidget(iceberg,"iceberg.html",selfcontained = FALSE,title = "WordCloud Iceberg")
+```
+
+# Buscar relaciones
+
+Procedemos a coger los 5 términos más frecuentes y a ver con que otros términos están relacionados:
+
+```{r}
+top.terms <- as.vector(head(freq.data.frame$name,5))
+assocs <- findAssocs(dtm, terms = top.terms, corlimit = 0.25)
+assocs <- unlist(assocs)
+assocs.data.frame <- data.frame(asociacion = names(assocs), satisfacion = assocs)
+row.names(assocs.data.frame) <- c(1:nrow(assocs.data.frame))
+assocs.data.frame
+```
+
+# Dispositivos usados
+
+```{r}
+encodeSource <- function(x) {
+  if(x=="<a href=\"http://twitter.com/download/iphone\" rel=\"nofollow\">Twitter for iPhone</a>"){
+    gsub("<a href=\"http://twitter.com/download/iphone\" rel=\"nofollow\">Twitter for iPhone</a>", "iphone", x,fixed=TRUE)
+  }else if(x=="<a href=\"http://twitter.com/#!/download/ipad\" rel=\"nofollow\">Twitter for iPad</a>"){
+    gsub("<a href=\"http://twitter.com/#!/download/ipad\" rel=\"nofollow\">Twitter for iPad</a>","ipad",x,fixed=TRUE)
+  }else if(x=="<a href=\"http://twitter.com/download/android\" rel=\"nofollow\">Twitter for Android</a>"){
+    gsub("<a href=\"http://twitter.com/download/android\" rel=\"nofollow\">Twitter for Android</a>","android",x,fixed=TRUE)
+  } else if(x=="<a href=\"http://twitter.com\" rel=\"nofollow\">Twitter Web Client</a>"){
+    gsub("<a href=\"http://twitter.com\" rel=\"nofollow\">Twitter Web Client</a>","Web",x,fixed=TRUE)
+  } else if(x=="<a href=\"http://www.twitter.com\" rel=\"nofollow\">Twitter for Windows Phone</a>"){
+    gsub("<a href=\"http://www.twitter.com\" rel=\"nofollow\">Twitter for Windows Phone</a>","windows phone",x,fixed=TRUE)
+  }else if(x=="<a href=\"http://dlvr.it\" rel=\"nofollow\">dlvr.it</a>"){
+    gsub("<a href=\"http://dlvr.it\" rel=\"nofollow\">dlvr.it</a>","dlvr.it",x,fixed=TRUE)
+  }else if(x=="<a href=\"http://ifttt.com\" rel=\"nofollow\">IFTTT</a>"){
+    gsub("<a href=\"http://ifttt.com\" rel=\"nofollow\">IFTTT</a>","ifttt",x,fixed=TRUE)
+  }else if(x=="<a href=\"http://earthquaketrack.com\" rel=\"nofollow\">EarthquakeTrack.com</a>"){
+    gsub("<a href=\"http://earthquaketrack.com\" rel=\"nofollow\">EarthquakeTrack.com</a>","earthquaketrack",x,fixed=TRUE)
+  }else if(x=="<a href=\"http://www.didyoufeel.it/\" rel=\"nofollow\">Did You Feel It</a>"){
+    gsub("<a href=\"http://www.didyoufeel.it/\" rel=\"nofollow\">Did You Feel It</a>","did_you_feel_it",x,fixed=TRUE)
+  }else if(x=="<a href=\"http://www.mobeezio.com/apps/earthquake\" rel=\"nofollow\">Earthquake Mobile</a>"){
+    gsub("<a href=\"http://www.mobeezio.com/apps/earthquake\" rel=\"nofollow\">Earthquake Mobile</a>","earthquake_mobile",x,fixed=TRUE)
+  }else if(x=="<a href=\"http://www.facebook.com/twitter\" rel=\"nofollow\">Facebook</a>"){
+    gsub("<a href=\"http://www.facebook.com/twitter\" rel=\"nofollow\">Facebook</a>","facebook",x,fixed=TRUE)
+  }else {
+    "others"
+  }
+}
+```
+
+Creamos una nueva columna en el dataframe que recoja los dispositivos desde los que se haya mandado el tweet:
+
+```{r}
+tweets.data.frame$tweetSource = sapply(tweets.data.frame$statusSource, function(sourceSystem) encodeSource(sourceSystem))
+```
+
+Dado que son muchos tweets vamos a crear una gráfica para poder observarlo:
+
+```{r}
+ggplot(tweets.data.frame[tweets.data.frame$tweetSource != "others",], aes(tweetSource)) + geom_bar(fill = "skyblue") + ylab("Numero de tweets") + xlab("Dispositivo")
+```
+
+Por último, vamos a obtener la palabra que más veces aparece en nuestro wordcloud. En nuestro caso esta palabra es:
+
+```{r}
+most.common.term <- as.vector(freq.data.frame[1,]$name)
+most.common.term
+```
+
+Grabamos ahora en un dataframe los tweets en los que aparece dicho término. Las columnas del dataframe serán término, usuario y texto del tweet:
+
+```{r}
+term.data.frame <- select(filter(tweets.data.frame, stringr::str_detect(tweets.data.frame$text, most.common.term)), text, screenName)
+term.data.frame <- mutate(term.data.frame, most.common.term)
+term.data.frame
+```
+
+## Conclusiones
+
+Como podemos ver en muchos de los ejemplos imprimidos, esta labor de estudio necesita de una profunda preparación con el objetivo de limpiar la lista de tweets que hayan sido publicados por bots por ejemplo y que no tengan ningún tipo de relevancia para el estudio.
