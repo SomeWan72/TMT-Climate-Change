@@ -1,7 +1,7 @@
 # TMT-Climate-Change
 Analysis of tweets that contains the hashtag #CambioClimatico.
 
-For this analysis I have use several libraries listed below:
+For this analysis I have use the libraries listed below:
 
 - devtools
 - base64enc
@@ -23,3 +23,5 @@ For this analysis I have use several libraries listed below:
 - webshot
 - htmlwidgets
 - wordcloud2
+
+It also includes the result generated (including one wordcloud with the most used words).
